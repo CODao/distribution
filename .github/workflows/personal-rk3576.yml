@@ -1,0 +1,155 @@
+name: Personal RK3576 build
+
+# Self-contained build for personal ROCKNIX images (no reusable-workflow chain,
+# no environments, no secrets). Builds the docker image locally on the runner
+# and produces target/ROCKNIX-RK3576*.img.gz as an artifact.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  toolchain:
+    name: Toolchain (RK3576)
+    runs-on: ubuntu-24.04
+    env:
+      JAVA_HOME: /usr
+      AUTOREMOVE: "yes"
+      AUTOREMOVE_BLOCK: "gcc glibc libtool flex"
+      PROJECT: ROCKNIX
+      DEVICE: RK3576
+      ARCH: aarch64
+      DISABLE_COLORS: yes
+      CCACHE_COMPILERCHECK: content
+      CCACHE_COMPRESS: 1
+      CCACHE_COMPRESSLEVEL: 6
+      CCACHE_SLOPPINESS: pch_defines,time_macros,include_file_mtime,include_file_ctime
+    steps:
+      - name: Maximize build space
+        uses: justinthelaw/maximize-github-runner-space@v0.9.0
+        with:
+          skip-components: docker-engine
+
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Build local build container
+        run: docker build -t rocknix-build .
+
+      - name: Build toolchain
+        uses: corrupt952/actions-retry-command@v1.0.7
+        with:
+          command: |
+            ./scripts/get_env > .env
+            set -e
+            { docker run --init --env-file .env --rm --user $(id -u):$(id -g) -v ${PWD}:${PWD} -w ${PWD} rocknix-build \
+              bash -c "./scripts/build_mt toolchain alsa-lib llvm:host && ./scripts/build_mt llvm:target"; echo $? > docker_exit_code; } | tee output.log | grep -E --color=never --line-buffered "^GET|^UNPACK|^BUILD|^INSTALL" || true
+            exit_code=$(<docker_exit_code)
+            exit $exit_code
+          max_attempts: 3
+          retry_interval: 10
+
+      - name: Archive logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: logs-toolchain
+          path: |
+            output.log
+            ./build.ROCKNIX-RK3576.aarch64/.threads/logs/
+          if-no-files-found: ignore
+
+      - name: Compress toolchain
+        run: |
+          tar --zstd -cf build.aarch64-toolchain.tar.zst \
+            ./build.ROCKNIX-RK3576.aarch64/toolchain \
+            ./build.ROCKNIX-RK3576.aarch64/build \
+            ./build.ROCKNIX-RK3576.aarch64/install_* \
+            ./build.ROCKNIX-RK3576.aarch64/.stamps
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: aarch64-toolchain-RK3576
+          path: build.aarch64-toolchain.tar.zst
+          compression-level: 0
+          if-no-files-found: error
+
+  image:
+    name: Image (RK3576)
+    needs: toolchain
+    runs-on: ubuntu-24.04
+    env:
+      EMULATION_DEVICE: no
+      ENABLE_32BIT: no
+      MODULES_PKG: no
+      JAVA_HOME: /usr
+      AUTOREMOVE: "yes"
+      PROJECT: ROCKNIX
+      DEVICE: RK3576
+      ARCH: aarch64
+      DISABLE_COLORS: yes
+      CCACHE_COMPILERCHECK: content
+      CCACHE_COMPRESS: 1
+      CCACHE_COMPRESSLEVEL: 6
+      CCACHE_SLOPPINESS: pch_defines,time_macros,include_file_mtime,include_file_ctime
+    steps:
+      - name: Maximize build space
+        uses: justinthelaw/maximize-github-runner-space@v0.9.0
+        with:
+          skip-components: docker-engine
+
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download toolchain
+        uses: actions/download-artifact@v7
+        with:
+          name: aarch64-toolchain-RK3576
+
+      - name: Extract toolchain
+        run: |
+          tar --zstd -xf build.aarch64-toolchain.tar.zst
+          rm build.aarch64-toolchain.tar.zst
+
+      - name: Build local build container
+        run: docker build -t rocknix-build .
+
+      - name: Build distribution and image
+        uses: corrupt952/actions-retry-command@v1.0.7
+        with:
+          command: |
+            ./scripts/get_env > .env
+            set -e
+            { docker run --init --env-file .env --rm --user $(id -u):$(id -g) -v ${PWD}:${PWD} -w ${PWD} rocknix-build \
+              bash -c "./scripts/build_distro"; echo $? > docker_exit_code; } | tee output.log | grep -E --color=never --line-buffered "^GET|^UNPACK|^BUILD|^INSTALL" || true
+            exit_code=$(<docker_exit_code)
+            exit $exit_code
+          max_attempts: 3
+          retry_interval: 10
+
+      - name: Archive logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: logs-image
+          path: |
+            output.log
+            ./build.ROCKNIX-RK3576.aarch64/.threads/logs/
+          if-no-files-found: ignore
+
+      - name: Get date
+        run: echo "DATE=$(date +'%Y%m%d')" >> $GITHUB_ENV
+
+      - name: Upload image
+        uses: actions/upload-artifact@v7
+        with:
+          name: ROCKNIX-RK3576-image-${{ env.DATE }}
+          path: |
+            target/ROCKNIX-*.img.gz
+            target/ROCKNIX-*.img.gz.sha256
+          compression-level: 0
+          if-no-files-found: error
